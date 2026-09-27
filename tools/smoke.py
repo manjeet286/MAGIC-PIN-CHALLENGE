@@ -145,9 +145,16 @@ def main() -> None:
                                         "received_at": "2026-04-26T10:42:00Z", "turn_number": 3}).json()
     check(r["action"] == "end", "ended conversation stays ended")
 
-    print("\n7. teardown")
+    print("\n7. teardown + production cache mode")
+    mode = bot.CACHE_MODE
+    bot.CACHE_MODE = "memory"
+    bot._cache_put("smoke_probe", {"x": 1}, "smoke")
+    check(bot._cache_get("smoke_probe") == {"x": 1} and not (bot.LLM_CACHE_DIR / "smoke_probe.json").exists(),
+          "memory mode caches in RAM only (nothing written to disk)")
     client.post("/v1/teardown")
     check(set(client.get("/v1/healthz").json()["contexts_loaded"].values()) == {0}, "teardown wipes state")
+    check(bot._cache_get("smoke_probe") is None, "teardown wipes the runtime LLM cache")
+    bot.CACHE_MODE = mode
 
     if preview:
         write_preview(data)

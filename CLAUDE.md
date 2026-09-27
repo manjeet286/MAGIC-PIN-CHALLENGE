@@ -44,6 +44,10 @@ cd dataset && python generate_dataset.py --out ./expanded
 # Submission: writes submission.jsonl (30 lines, brief §7.2) from cached compositions and lints it (--mock = no API calls)
 .venv/Scripts/python tools/make_submission.py
 
+# Snapshot the LLM responses behind submission.jsonl into submission_cache/ (shipped, read-only) and verify that
+# compose() reproduces submission.jsonl from it alone. Re-run after every make_submission.py.
+.venv/Scripts/python tools/export_submission_cache.py
+
 # Score submission.jsonl with the local judge's rubric via the bot's cached client (re-scoring unchanged lines is free).
 # --pairs T01,T21 to re-score a subset; reasons/hints in .cache/scores.md
 .venv/Scripts/python tools/score_submission.py
@@ -139,7 +143,11 @@ A missing field is scored 0 with a -2 penalty. The first outbound message must b
 5. On rejection there is one retry, carrying the problem list. If that also fails, the template is used.
 
 **LLM plumbing:**
-- Every response is cached in `.cache/llm/<sha256 of the messages>.json`. The cache is what makes `compose()` deterministic, because the model accepts no temperature 0.
+- The cache key is the sha256 of the model, max tokens and messages. The cache is what makes `compose()` deterministic, because the model accepts no temperature 0. Lookup order:
+  1. `submission_cache/` (read-only, committed)
+  2. `.cache/llm/` (only when `VERA_CACHE_MODE=disk`, the dev default)
+  3. the in-memory cache
+- **Production runs with `VERA_CACHE_MODE=memory`:** nothing is written to disk and `/v1/teardown` wipes the runtime cache (brief §11: no context may persist after the test). Deploy with the `Procfile` (single worker, `$PORT`) and `.python-version` (3.12), and set `VERA_SPEND_CAP_USD=1.50` on the host.
 - Spend is logged to `.cache/llm_ledger.jsonl`. Calls stop once the total reaches `VERA_SPEND_CAP_USD` (default 4.50).
 - `MOCK_LLM=1` blocks API calls but still serves cached results. `tools/smoke.py` and `tools/replay_tests.py` force it.
 - `/v1/tick` composes in parallel on a thread pool (`VERA_LLM_WORKERS`, default 8) against a deadline (`VERA_TICK_BUDGET_S`, default 9). Anything unfinished falls back to templates. Per-call timeout is `VERA_LLM_TIMEOUT_S` (default 8).

@@ -30,7 +30,7 @@ except ImportError:
 
 import conversation_handlers
 
-BOT_VERSION = "0.1.0"
+BOT_VERSION = "1.0.0"
 STARTED = time.time()
 MAX_ACTIONS_PER_TICK = 20
 MAX_UNANSWERED = 3
@@ -925,9 +925,45 @@ LLM_TIMEOUT_S = float(os.environ.get("VERA_LLM_TIMEOUT_S", "8"))
 PRICE_IN = float(os.environ.get("LLM_PRICE_IN", "0.20"))    # $ per 1M input tokens
 PRICE_OUT = float(os.environ.get("LLM_PRICE_OUT", "1.20"))  # $ per 1M output tokens
 SPEND_CAP = float(os.environ.get("VERA_SPEND_CAP_USD", "4.50"))
+# "disk" (dev): responses persist in .cache/llm. "memory" (production): nothing touches disk and /v1/teardown wipes it,
+# as the brief forbids persisting context data after the test. submission_cache/ is a read-only snapshot of the
+# responses behind submission.jsonl, so compose() reproduces it exactly in either mode.
+CACHE_MODE = os.environ.get("VERA_CACHE_MODE", "disk")
+SHIPPED_CACHE_DIR = Path(__file__).with_name("submission_cache")
+_mem_cache: dict[str, dict] = {}
+CACHE_KEYS_USED: set[str] = set()  # read by tools/export_submission_cache.py
 _llm_lock = threading.Lock()
 _llm_client = None
 _spent: Optional[float] = None
+
+
+def _cache_get(key: str) -> Optional[dict]:
+    paths = [SHIPPED_CACHE_DIR / f"{key}.json"] + ([LLM_CACHE_DIR / f"{key}.json"] if CACHE_MODE == "disk" else [])
+    for path in paths:
+        if path.exists():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))["response"]
+            except (ValueError, KeyError):
+                continue
+            CACHE_KEYS_USED.add(key)
+            return data
+    if key in _mem_cache:
+        CACHE_KEYS_USED.add(key)
+        return _mem_cache[key]
+    return None
+
+
+def _cache_put(key: str, data: dict, purpose: str) -> None:
+    if CACHE_MODE != "disk":
+        _mem_cache[key] = data
+        return
+    LLM_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    (LLM_CACHE_DIR / f"{key}.json").write_text(
+        json.dumps({"response": data, "purpose": purpose, "model": LLM_MODEL}, ensure_ascii=False), encoding="utf-8")
+
+
+def clear_runtime_cache() -> None:
+    _mem_cache.clear()
 
 
 def llm_enabled() -> bool:
@@ -975,12 +1011,9 @@ def llm_json(messages: list[dict], purpose: str, max_tokens: int = 500, deadline
         return None
     key = hashlib.sha256(json.dumps([LLM_MODEL, max_tokens, messages], ensure_ascii=False, sort_keys=True)
                          .encode("utf-8")).hexdigest()
-    path = LLM_CACHE_DIR / f"{key}.json"
-    if path.exists():
-        try:
-            return json.loads(path.read_text(encoding="utf-8"))["response"]
-        except (ValueError, KeyError):
-            pass
+    cached = _cache_get(key)
+    if cached is not None:
+        return cached
     if not llm_enabled() or llm_spent() >= SPEND_CAP:
         return None
     timeout = LLM_TIMEOUT_S if deadline is None else min(LLM_TIMEOUT_S, deadline - time.monotonic() - 0.3)
@@ -1005,9 +1038,7 @@ def llm_json(messages: list[dict], purpose: str, max_tokens: int = 500, deadline
         return None
     if not isinstance(data, dict):
         return None
-    LLM_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"response": data, "purpose": purpose, "model": LLM_MODEL}, ensure_ascii=False),
-                    encoding="utf-8")
+    _cache_put(key, data, purpose)
     return data
 
 
@@ -1864,4 +1895,5 @@ def reply(body: ReplyBody):
 @app.post("/v1/teardown")
 def teardown():
     store.reset()
+    clear_runtime_cache()
     return {"wiped": True}
