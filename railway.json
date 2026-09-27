@@ -1,0 +1,9 @@
+{
+  "$schema": "https://railway.com/railway.schema.json",
+  "deploy": {
+    "startCommand": "uvicorn bot:app --host 0.0.0.0 --port ${PORT:-8080} --workers 1",
+    "healthcheckPath": "/v1/healthz",
+    "healthcheckTimeout": 60,
+    "restartPolicyType": "ON_FAILURE"
+  }
+}
